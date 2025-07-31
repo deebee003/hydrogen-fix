@@ -1,0 +1,1 @@
+curl -s https://raw.githubusercontent.com/deebee003/hydrogen-fix/refs/heads/main/hydro.sh | bash

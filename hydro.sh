@@ -36,25 +36,6 @@ ensure_command_exists() {
   fi
 }
 
-download_jq_if_needed() {
-  if command -v jq &>/dev/null; then
-    JQ_BIN="jq"
-    print_color "$GREEN" "$CHECK_MARK jq found in system PATH\n"
-  else
-    JQ_BIN="$HOME/jq"
-    if [ ! -x "$JQ_BIN" ]; then
-      print_color "$WHITE" "Downloading jq...\n"
-      curl -L -o "$JQ_BIN" https://github.com/stedolan/jq/releases/download/jq-1.6/jq-osx-amd64
-      $JQ_BIN --version
-      echo "$latest_version_json" | head -20
-      chmod +x "$JQ_BIN"
-      print_color "$GREEN" "$CHECK_MARK jq downloaded to $JQ_BIN\n"
-    else
-      print_color "$GREEN" "$CHECK_MARK jq binary already exists at $JQ_BIN\n"
-    fi
-  fi
-}
-
 download_file() {
   local url=$1
   local output_file=$2
@@ -81,7 +62,6 @@ cleanup() {
   rm -f "$HOME/hydrogen.zip"
   rm -rf "$HOME/hydrogen_unzip"
   rm -rf "$HOME/roblox_unzip"
-  [ -f "$HOME/jq" ] && rm -f "$HOME/jq"
   [ -d "Hydrogen.app" ] && rm -rf "Hydrogen.app"
   [ -d "Roblox.app" ] && rm -rf "Roblox.app"
 }
@@ -96,6 +76,9 @@ main() {
 
   mkdir -p "/tmp/hydro_exec/"
 
+  # Use system jq only
+  ensure_command_exists "jq" "jq could not be found! Please install jq."
+
   ensure_command_exists "curl" "Curl could not be found! This should never happen."
   ensure_command_exists "unzip" "Unzip could not be found! This should never happen."
 
@@ -104,8 +87,6 @@ main() {
 
   rm -rf "/Users/a/Applications/Roblox.app"
   rm -rf "/Users/a/Applications/Hydrogen.app"
-
-  download_jq_if_needed
 
   local latest_version_json
   latest_version_json=$(curl --silent --fail "https://clientsettingscdn.roblox.com/v2/client-version/MacPlayer")
@@ -116,7 +97,7 @@ main() {
   fi
 
   local current_version
-  current_version=$("$JQ_BIN" -r ".clientVersionUpload" <<< "$latest_version_json")
+  current_version=$(jq -r ".clientVersionUpload" <<< "$latest_version_json")
 
   if [ -z "$current_version" ] || [ "$current_version" = "null" ]; then
     print_color "$RED" "$X_MARK Could not parse Roblox version\n"
@@ -143,7 +124,7 @@ main() {
   mkdir -p "$HOME/hydrogen_unzip"
   unzip_file "$HOME/hydrogen.zip" "$HOME/hydrogen_unzip" "Unzipping Hydrogen... " "Unzipped Hydrogen!"
 
-  # You can add the rest of your installation steps here like moving files, patching, permissions, etc.
+  # Add your post-download install steps here (moving files, patching, permissions, etc.)
 
   print_color "$GREEN" "Hydrogen and Roblox setup steps completed!\n"
 }

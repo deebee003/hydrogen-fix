@@ -45,6 +45,8 @@ download_jq_if_needed() {
     if [ ! -x "$JQ_BIN" ]; then
       print_color "$WHITE" "Downloading jq...\n"
       curl -L -o "$JQ_BIN" https://github.com/stedolan/jq/releases/download/jq-1.6/jq-osx-amd64
+      $JQ_BIN --version
+      echo "$latest_version_json" | head -20
       chmod +x "$JQ_BIN"
       print_color "$GREEN" "$CHECK_MARK jq downloaded to $JQ_BIN\n"
     else

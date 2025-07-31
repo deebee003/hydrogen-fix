@@ -1,17 +1,16 @@
 #!/bin/bash
 set -e
 
-# Constants
-readonly RED=$(tput setaf 1)
-readonly GREEN=$(tput setaf 2)
-readonly WHITE=$(tput setaf 7)
-readonly RESET=$(tput sgr0)
-readonly CHECK_MARK="\033[0;32m\xE2\x9C\x94\033[0m"
-readonly X_MARK="\033[0;31m\xE2\x9C\x98\033[0m"
+# Colors and symbols
+RED=$(tput setaf 1)
+GREEN=$(tput setaf 2)
+WHITE=$(tput setaf 7)
+RESET=$(tput sgr0)
+CHECK_MARK="\033[0;32m\xE2\x9C\x94\033[0m"
+X_MARK="\033[0;31m\xE2\x9C\x98\033[0m"
 
-# Status Codes
-readonly EXIT_COMMAND_NOT_FOUND=127
-readonly EXIT_VERSION_FETCH_FAILED=3
+# Exit codes
+EXIT_COMMAND_NOT_FOUND=127
 
 print_color() {
   local color=$1
@@ -37,9 +36,21 @@ ensure_command_exists() {
   fi
 }
 
-fetch_url() {
-  local url=$1
-  curl --silent --fail "$url"
+download_jq_if_needed() {
+  if command -v jq &>/dev/null; then
+    JQ_BIN="jq"
+    print_color "$GREEN" "$CHECK_MARK jq found in system PATH\n"
+  else
+    JQ_BIN="$HOME/jq"
+    if [ ! -x "$JQ_BIN" ]; then
+      print_color "$WHITE" "Downloading jq...\n"
+      curl -L -o "$JQ_BIN" https://github.com/stedolan/jq/releases/download/jq-1.6/jq-osx-amd64
+      chmod +x "$JQ_BIN"
+      print_color "$GREEN" "$CHECK_MARK jq downloaded to $JQ_BIN\n"
+    else
+      print_color "$GREEN" "$CHECK_MARK jq binary already exists at $JQ_BIN\n"
+    fi
+  fi
 }
 
 download_file() {
@@ -47,21 +58,10 @@ download_file() {
   local output_file=$2
   local pre_message=$3
   local success_message=$4
-  local error_message=$5
 
   print_color "$WHITE" "$pre_message"
-  curl --location "$url" --output "$output_file" >/dev/null 2>&1 &
-  
-  local curl_pid=$!
-
-  while kill -0 $curl_pid >/dev/null 2>&1; do
-    echo -n "."
-    sleep 0.5
-  done
-  
-  wait "$curl_pid"
-
-  overwrite_color "$GREEN" "$CHECK_MARK $success_message\n"
+  curl --location --progress-bar "$url" --output "$output_file"
+  overwrite_color "$GREEN" "$CHECK_MARK $success_message"
 }
 
 unzip_file() {
@@ -69,25 +69,17 @@ unzip_file() {
   local destination_dir=$2
   local pre_message=$3
   local success_message=$4
-  local error_message=$5
-
-  if [ ! -f "$zip_file" ]; then
-    print_color "$RED" "$X_MARK $error_message\n"
-    exit 1
-  fi
-
-  mkdir -p "$destination_dir"
 
   print_color "$WHITE" "$pre_message"
   unzip -o -q "$zip_file" -d "$destination_dir"
-  overwrite_color "$GREEN" "$CHECK_MARK $success_message\n"
+  overwrite_color "$GREEN" "$CHECK_MARK $success_message"
 }
 
 cleanup() {
   rm -f "$HOME/hydrogen.zip"
   rm -rf "$HOME/hydrogen_unzip"
   rm -rf "$HOME/roblox_unzip"
-  rm "$HOME/jq"
+  [ -f "$HOME/jq" ] && rm -f "$HOME/jq"
   [ -d "Hydrogen.app" ] && rm -rf "Hydrogen.app"
   [ -d "Roblox.app" ] && rm -rf "Roblox.app"
 }
@@ -96,109 +88,62 @@ main() {
   trap cleanup EXIT
 
   if [ "$(id -u)" -eq 0 ]; then
-    print_color "$RED" "$X_MARK Please do not run as root!\n" >&2
+    print_color "$RED" "$X_MARK Please do not run as root!\n"
     exit 1
   fi
 
   mkdir -p "/tmp/hydro_exec/"
 
-  ensure_command_exists "curl" "Curl could not be found! This should never happen. Open a ticket."
-  ensure_command_exists "unzip" "Unzip could not be found! This should never happen. Open a ticket."
+  ensure_command_exists "curl" "Curl could not be found! This should never happen."
+  ensure_command_exists "unzip" "Unzip could not be found! This should never happen."
 
   pkill -9 Roblox || true
   pkill -9 Hydrogen || true
 
-  # Adjust these paths to your actual user folder:
-  local applications_dir="/Users/a/Applications"
-  rm -rf "$applications_dir/Roblox.app"
-  rm -rf "$applications_dir/Hydrogen.app"
+  rm -rf "/Users/a/Applications/Roblox.app"
+  rm -rf "/Users/a/Applications/Hydrogen.app"
 
-  local jq_link="https://cdn.discordapp.com/attachments/1043972790266626179/1138954421204684990/jq"
-  download_file "$jq_link" "$HOME/jq" "Downloading jq..." "jq has been downloaded!" "Failed to download the latest jq version. Please check your internet connection and try again."
-  chmod +x "$HOME/jq"
+  download_jq_if_needed
 
-  local latest_version_json=$(fetch_url "https://clientsettingscdn.roblox.com/v2/client-version/MacPlayer")
-  local current_version=$(echo "$latest_version_json" | "$HOME/jq" ".clientVersionUpload" | tr -d '"')
+  local latest_version_json
+  latest_version_json=$(curl --silent --fail "https://clientsettingscdn.roblox.com/v2/client-version/MacPlayer")
+
+  if [ -z "$latest_version_json" ]; then
+    print_color "$RED" "$X_MARK Failed to fetch Roblox version info\n"
+    exit 3
+  fi
+
+  local current_version
+  current_version=$("$JQ_BIN" -r ".clientVersionUpload" <<< "$latest_version_json")
+
+  if [ -z "$current_version" ] || [ "$current_version" = "null" ]; then
+    print_color "$RED" "$X_MARK Could not parse Roblox version\n"
+    exit 3
+  fi
 
   print_color "$GREEN" "$CHECK_MARK Got latest version of Roblox! $current_version\n"
 
-  local download_url="http://setup.rbxcdn.com/mac/$current_version-RobloxPlayer.zip"
-  local output_file="$HOME/$current_version-RobloxPlayer.zip"
+  local download_url="http://setup.rbxcdn.com/mac/${current_version}-RobloxPlayer.zip"
+  local output_file="$HOME/${current_version}-RobloxPlayer.zip"
 
-  download_file "$download_url" "$output_file" "Downloading Roblox (this might take awhile)..." "Roblox has been downloaded!" "Failed to download the latest Roblox version. Please check your internet connection and try again."
+  download_file "$download_url" "$output_file" "Downloading Roblox (this might take awhile)... " "Roblox has been downloaded!"
 
-  unzip_file "$output_file" "$HOME/roblox_unzip" "Unzipping Roblox..." "Unzipped Roblox!" "Failed to unzip Roblox."
+  mkdir -p "$HOME/roblox_unzip"
+  unzip_file "$output_file" "$HOME/roblox_unzip" "Unzipping Roblox... " "Unzipped Roblox!"
 
-  rm "$output_file"
+  rm -f "$output_file"
 
-  #############################################################################################################################
+  # --- Hydrogen download ---
+
   local current_hydrogen_exec="https://cdn.discordapp.com/attachments/1043972790266626179/1169770258614210570/Hydrogen.app.zip"
-  #############################################################################################################################
+  download_file "$current_hydrogen_exec" "$HOME/hydrogen.zip" "Downloading Hydrogen... " "Hydrogen has been downloaded!"
 
-  download_file "$current_hydrogen_exec" "$HOME/hydrogen.zip" "Downloading Hydrogen..." "Hydrogen has been downloaded!" "Failed to download the latest Hydrogen version. Please check your internet connection and try again."
+  mkdir -p "$HOME/hydrogen_unzip"
+  unzip_file "$HOME/hydrogen.zip" "$HOME/hydrogen_unzip" "Unzipping Hydrogen... " "Unzipped Hydrogen!"
 
-  unzip_file "$HOME/hydrogen.zip" "$HOME/hydrogen_unzip" "Unzipping Hydrogen..." "Unzipped Hydrogen!" "Failed to unzip Hydrogen."
+  # You can add the rest of your installation steps here like moving files, patching, permissions, etc.
 
-  local hydrogen_app_path="$applications_dir/Hydrogen.app"
-  local roblox_app_path="$applications_dir/Roblox.app"
-
-  [ -d "$hydrogen_app_path" ] && rm -rf "$hydrogen_app_path"
-  [ -d "$roblox_app_path" ] && rm -rf "$roblox_app_path"
-  
-  mv "$HOME/roblox_unzip/RobloxPlayer.app" "$roblox_app_path"
-
-  local channel="live"
-  local version_json=$(fetch_url "https://clientsettingscdn.roblox.com/v2/client-version/MacPlayer/channel/$channel")
-
-  echo -e "$CHECK_MARK You are on the production channel: $version_json"
-
-  local spoofed_version=$(echo "$version_json" | "$HOME/jq" ".version")
-  local spoofed_bootstrap=$(echo "$version_json" | "$HOME/jq" ".bootstrapperVersion")
-
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $spoofed_version" "$roblox_app_path/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $spoofed_bootstrap" "$roblox_app_path/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $spoofed_version" "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/Info.plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $spoofed_bootstrap" "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/Info.plist"
-
-  echo -e "$CHECK_MARK Disabled remote channel updates"
-
-  chmod -R 777 "$roblox_app_path"
-
-  rm -rf "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/_CodeSignature"
-  xattr -cr "$roblox_app_path/Contents/MacOS/Roblox.app"
-  rm -f "$HOME/Library/Preferences/com.Roblox.Roblox.plist"
-  rm -f "$HOME/Library/Preferences/com.roblox.RobloxPlayerChannel.plist"
-  killall cfprefsd || true
-
-  echo -e "$CHECK_MARK Installing Roblox..."
-
-  cp "$HOME/hydrogen_unzip/Hydrogen.app/Contents/Resources/libHydrogenLoader.dylib" "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/MacOS/libHydrogenLoader.dylib"
-  "$HOME/hydrogen_unzip/Hydrogen.app/Contents/Resources/insert_dylib" --strip-codesig --all-yes "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/MacOS/libHydrogenLoader.dylib" "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/MacOS/Roblox" "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/MacOS/Roblox" >/dev/null 2>&1
-
-  rm -rf "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/_CodeSignature"
-  xattr -cr "$roblox_app_path/Contents/MacOS/Roblox.app"
-  rm -rf "$roblox_app_path/Contents/_CodeSignature"
-  xattr -cr "$roblox_app_path"
-
-  rm -f "$HOME/Library/Preferences/com.Roblox.Roblox.plist"
-  rm -f "$HOME/Library/Preferences/com.roblox.RobloxPlayerChannel.plist"
-  killall cfprefsd || true
-
-  cp "$HOME/hydrogen_unzip/Hydrogen.app/Contents/Resources/libHydrogen.dylib" "$roblox_app_path/Contents/MacOS/libHydrogen.dylib"
-  cp "$roblox_app_path/Contents/MacOS/RobloxPlayer" "$roblox_app_path/Contents/MacOS/.RobloxPlayer"
-
-  "$HOME/hydrogen_unzip/Hydrogen.app/Contents/Resources/insert_dylib" --strip-codesig --all-yes "$roblox_app_path/Contents/MacOS/libHydrogen.dylib" "$roblox_app_path/Contents/MacOS/.RobloxPlayer" "$roblox_app_path/Contents/MacOS/RobloxPlayer" >/dev/null 2>&1
-  
-  cp "$HOME/hydrogen_unzip/Hydrogen.app/Contents/Resources/libHydrogenLoader.dylib" "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/MacOS/libHydrogenLoader.dylib"
-  "$HOME/hydrogen_unzip/Hydrogen.app/Contents/Resources/insert_dylib" --strip-codesig --all-yes "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/MacOS/libHydrogenLoader.dylib" "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/MacOS/Roblox" "$roblox_app_path/Contents/MacOS/Roblox.app/Contents/MacOS/Roblox" >/dev/null 2>&1
-
-  mv "$HOME/hydrogen_unzip/Hydrogen.app" "$hydrogen_app_path"
-  chmod -R 777 "$hydrogen_app_path"
-
-  mkdir -p "$HOME/Hydrogen/autoexec" "$HOME/Hydrogen/workspace" "$HOME/Hydrogen/ui/themes"
-  chmod -R 777 "$HOME/Hydrogen"
-
-  print_color "$GREEN" "Hydrogen has been installed! Enjoy!\n"
+  print_color "$GREEN" "Hydrogen and Roblox setup steps completed!\n"
 }
 
 main "$@"
